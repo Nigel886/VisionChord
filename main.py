@@ -1,6 +1,7 @@
 import math
 import os
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -8,6 +9,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import pygame
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 
 
 @dataclass
@@ -197,6 +200,71 @@ def load_chord_sound(chord: str, audio_dir: str) -> pygame.mixer.Sound:
     return generate_strum_chord(chord)
 
 
+HAND_CONNECTIONS = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+    (5, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+    (9, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),
+    (13, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20),
+    (0, 17),
+]
+
+
+def draw_hand_landmarks(frame: np.ndarray, lm3d: np.ndarray) -> None:
+    h, w = frame.shape[:2]
+
+    for a, b in HAND_CONNECTIONS:
+        ax, ay = int(lm3d[a][0] * w), int(lm3d[a][1] * h)
+        bx, by = int(lm3d[b][0] * w), int(lm3d[b][1] * h)
+        cv2.line(frame, (ax, ay), (bx, by), (0, 255, 255), 2, cv2.LINE_AA)
+
+    for i in range(lm3d.shape[0]):
+        x, y = int(lm3d[i][0] * w), int(lm3d[i][1] * h)
+        cv2.circle(frame, (x, y), 3, (0, 255, 0), -1, cv2.LINE_AA)
+
+
+def ensure_hand_landmarker_model(model_path: str) -> None:
+    """
+    MediaPipe Tasks 版本需要手部模型文件（.task）。
+    若本地不存在则自动下载到指定路径。
+    """
+    if os.path.exists(model_path):
+        return
+
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    url = (
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+        "hand_landmarker/float16/1/hand_landmarker.task"
+    )
+    try:
+        print(f"[VisionChord] Downloading hand_landmarker.task -> {model_path}")
+        urllib.request.urlretrieve(url, model_path)
+    except Exception as e:
+        raise RuntimeError(
+            "无法自动下载 MediaPipe HandLandmarker 模型文件。\n"
+            f"- 目标路径：{model_path}\n"
+            f"- 下载地址：{url}\n"
+            f"- 错误信息：{e}\n"
+            "你也可以手动下载后放到该路径，然后重新运行。"
+        )
+
+
 class GestureDebouncer:
     """
     状态防抖（State Debounce）：
@@ -258,16 +326,20 @@ def main() -> None:
     if not cap.isOpened():
         raise RuntimeError("无法打开摄像头：请检查是否被占用，或尝试更换摄像头编号。")
 
-    # 4) MediaPipe Hands 初始化
-    mp_hands = mp.solutions.hands
-    mp_draw = mp.solutions.drawing_utils
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        model_complexity=1,
-        min_detection_confidence=0.6,
+    # 4) MediaPipe 手部关键点检测初始化（Tasks API）
+    # 说明：你安装的 mediapipe 版本不再提供 mp.solutions.*（旧接口），因此这里用 HandLandmarker（新接口）。
+    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "hand_landmarker.task")
+    ensure_hand_landmarker_model(model_path)
+
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=RunningMode.VIDEO,
+        num_hands=1,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.6,
         min_tracking_confidence=0.6,
     )
+    landmarker = HandLandmarker.create_from_options(options)
 
     debouncer = GestureDebouncer(stable_frames=5)
     last_triggered: str = "None"
@@ -286,20 +358,22 @@ def main() -> None:
         # 镜像翻转：更符合“对镜子做手势”的直觉
         frame = cv2.flip(frame, 1)
 
-        h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+        rgb = np.ascontiguousarray(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        timestamp_ms = int(time.time() * 1000)
+        results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
         raw_gesture = "None"
-        if results.multi_hand_landmarks:
-            hand_landmarks = results.multi_hand_landmarks[0]
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        if results.hand_landmarks:
+            hand_landmarks = results.hand_landmarks[0]
 
             # 转为 numpy 3D（归一化坐标系）
             lm = np.array(
-                [[p.x, p.y, p.z] for p in hand_landmarks.landmark],
+                [[p.x, p.y, p.z] for p in hand_landmarks],
                 dtype=np.float32,
             )
+            draw_hand_landmarks(frame, lm)
             raw_gesture = classify_curwen_gesture(lm)
 
         stable_gesture, changed = debouncer.update(raw_gesture)
@@ -347,7 +421,7 @@ def main() -> None:
         if key == ord("q") or key == 27:
             break
 
-    hands.close()
+    landmarker.close()
     cap.release()
     cv2.destroyAllWindows()
     pygame.quit()
