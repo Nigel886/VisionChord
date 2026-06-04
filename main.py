@@ -349,82 +349,82 @@ def main() -> None:
     last_fps_t = time.time()
     fps = 0.0
 
-    # 5) 主循环：采集 -> 识别 -> 渲染 -> 音频触发
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    window_name = "VisionChord - Curwen Hand Signs"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-        # 镜像翻转：更符合“对镜子做手势”的直觉
-        frame = cv2.flip(frame, 1)
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb = np.ascontiguousarray(rgb)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        timestamp_ms = int(time.time() * 1000)
-        results = landmarker.detect_for_video(mp_image, timestamp_ms)
+            frame = cv2.flip(frame, 1)
 
-        raw_gesture = "None"
-        if results.hand_landmarks:
-            hand_landmarks = results.hand_landmarks[0]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = np.ascontiguousarray(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp_ms = int(time.time() * 1000)
+            results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            # 转为 numpy 3D（归一化坐标系）
-            lm = np.array(
-                [[p.x, p.y, p.z] for p in hand_landmarks],
-                dtype=np.float32,
+            raw_gesture = "None"
+            if results.hand_landmarks:
+                hand_landmarks = results.hand_landmarks[0]
+
+                lm = np.array(
+                    [[p.x, p.y, p.z] for p in hand_landmarks],
+                    dtype=np.float32,
+                )
+                draw_hand_landmarks(frame, lm)
+                raw_gesture = classify_curwen_gesture(lm)
+
+            stable_gesture, changed = debouncer.update(raw_gesture)
+            chord = gesture_to_chord.get(stable_gesture, "")
+
+            current_display_gesture = stable_gesture
+            current_display_chord = chord
+
+            if changed:
+                if stable_gesture in ("Do", "Mi", "Sol") and stable_gesture != last_triggered:
+                    snd = chord_sounds.get(chord)
+                    if snd:
+                        snd.stop()
+                        snd.play()
+                    last_triggered = stable_gesture
+                elif stable_gesture == "None":
+                    last_triggered = "None"
+
+            now = time.time()
+            dt = now - last_fps_t
+            if dt > 0:
+                fps = 0.9 * fps + 0.1 * (1.0 / dt)
+            last_fps_t = now
+
+            overlay = f"Gesture: {current_display_gesture}   Chord: {current_display_chord}   FPS: {fps:.1f}"
+            cv2.putText(
+                frame,
+                overlay,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
             )
-            draw_hand_landmarks(frame, lm)
-            raw_gesture = classify_curwen_gesture(lm)
 
-        stable_gesture, changed = debouncer.update(raw_gesture)
-        chord = gesture_to_chord.get(stable_gesture, "")
+            cv2.imshow(window_name, frame)
 
-        current_display_gesture = stable_gesture
-        current_display_chord = chord
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q") or key == 27:
+                break
 
-        # 音频触发规则：
-        # - 从 None/其他 切到有效手势：立即播放
-        # - 同一稳定手势保持：只触发一次（不重叠播放）
-        if changed:
-            if stable_gesture in ("Do", "Mi", "Sol") and stable_gesture != last_triggered:
-                snd = chord_sounds.get(chord)
-                if snd:
-                    snd.stop()
-                    snd.play()
-                last_triggered = stable_gesture
-            elif stable_gesture == "None":
-                last_triggered = "None"
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                break
 
-        # FPS（仅用于调试观感）
-        now = time.time()
-        dt = now - last_fps_t
-        if dt > 0:
-            fps = 0.9 * fps + 0.1 * (1.0 / dt)
-        last_fps_t = now
-
-        # 6) UI：左上角显示手势与和弦
-        overlay = f"Gesture: {current_display_gesture}   Chord: {current_display_chord}   FPS: {fps:.1f}"
-        cv2.putText(
-            frame,
-            overlay,
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
-        cv2.imshow("VisionChord - Curwen Hand Signs", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q") or key == 27:
-            break
-
-    landmarker.close()
-    cap.release()
-    cv2.destroyAllWindows()
-    pygame.quit()
+    finally:
+        landmarker.close()
+        cap.release()
+        cv2.destroyAllWindows()
+        pygame.quit()
 
 
 if __name__ == "__main__":
