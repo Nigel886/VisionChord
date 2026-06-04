@@ -164,7 +164,17 @@ def generate_strum_chord(
 
     # pygame 需要 int16
     audio = (sig * 32767.0).astype(np.int16)
-    return pygame.sndarray.make_sound(audio)
+    mixer_init = pygame.mixer.get_init()
+    channels = int(mixer_init[2]) if mixer_init else 2
+    if channels == 1:
+        return pygame.sndarray.make_sound(audio)
+
+    if channels == 2:
+        stereo = np.column_stack((audio, audio))
+        return pygame.sndarray.make_sound(stereo)
+
+    multi = np.repeat(audio[:, None], channels, axis=1)
+    return pygame.sndarray.make_sound(multi)
 
 
 def load_chord_sound(chord: str, audio_dir: str) -> pygame.mixer.Sound:
@@ -220,10 +230,10 @@ class GestureDebouncer:
 
 def main() -> None:
     # 1) 初始化音频：建议先 pre_init 再 init 以获得更低延迟
-    pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=512)
+    pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
     pygame.init()
     try:
-        pygame.mixer.init()
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
     except Exception as e:
         raise RuntimeError(f"pygame.mixer 初始化失败：{e}")
 
