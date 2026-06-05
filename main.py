@@ -45,6 +45,12 @@ def _finger_straight(lm3d: np.ndarray, mcp: int, pip: int, tip: int) -> bool:
     return _angle_deg(v1, v2) > 160.0
 
 
+def _finger_curled(lm3d: np.ndarray, mcp: int, pip: int, tip: int) -> bool:
+    v1 = _vec(lm3d[mcp], lm3d[pip])
+    v2 = _vec(lm3d[tip], lm3d[pip])
+    return (_angle_deg(v1, v2) < 140.0) and (lm3d[tip][1] > lm3d[pip][1])
+
+
 def _palm_normal(lm3d: np.ndarray) -> np.ndarray:
     """
     用 wrist, index_mcp, pinky_mcp 近似得到掌面法线方向（右手定则）。
@@ -61,11 +67,7 @@ def _palm_normal(lm3d: np.ndarray) -> np.ndarray:
 
 def classify_curwen_gesture(lm3d: np.ndarray) -> str:
     """
-    Demo 阶段仅识别三种手势：
-    - Do：握拳（四指指尖 tip 的 y 坐标都低于 pip）
-    - Mi：四指伸直 + 手掌整体“水平”（掌指根连线近似水平）
-    - Sol：五指伸直 + 手掌近似“竖起”并“朝向摄像头”（掌面法线接近 z 轴）
-    返回值：'Do' | 'Mi' | 'Sol' | 'None'
+    返回值：'Do' | 'Re' | 'Mi' | 'Fa' | 'Sol' | 'La' | 'Ti' | 'None'
     """
     # 关键点索引参考：MediaPipe Hands 21 点
     # 0 wrist
@@ -81,6 +83,10 @@ def classify_curwen_gesture(lm3d: np.ndarray) -> str:
     pinky_straight = _finger_straight(lm3d, 17, 18, 20)
 
     four_straight = index_straight and middle_straight and ring_straight and pinky_straight
+    ring_curled = _finger_curled(lm3d, 13, 14, 16)
+    pinky_curled = _finger_curled(lm3d, 17, 18, 20)
+    index_curled = _finger_curled(lm3d, 5, 6, 8)
+    middle_curled = _finger_curled(lm3d, 9, 10, 12)
 
     # Do：四指指尖 y 坐标都“低于”其 PIP（图像坐标系 y 向下增大）
     do_cond = (
@@ -93,6 +99,10 @@ def classify_curwen_gesture(lm3d: np.ndarray) -> str:
     if do_cond:
         return "Do"
 
+    re_cond = index_straight and middle_straight and ring_curled and pinky_curled
+    if re_cond:
+        return "Re"
+
     # Mi：四指伸直 + 掌指根（index_mcp 到 pinky_mcp）连线近似水平
     index_mcp = lm3d[5]
     pinky_mcp = lm3d[17]
@@ -103,6 +113,22 @@ def classify_curwen_gesture(lm3d: np.ndarray) -> str:
 
     if four_straight and hand_horizontal:
         return "Mi"
+
+    palm_center = (lm3d[0] + lm3d[5] + lm3d[17]) / 3.0
+    thumb_tip = lm3d[4]
+    thumb_mcp = lm3d[2]
+    thumb_down = float(thumb_tip[1]) > float(thumb_mcp[1])
+    thumb_far = _safe_norm(_vec(palm_center, thumb_tip)) > _safe_norm(_vec(palm_center, thumb_mcp)) * 1.6
+    four_fist = (
+        (lm3d[8][1] > lm3d[6][1])
+        and (lm3d[12][1] > lm3d[10][1])
+        and (lm3d[16][1] > lm3d[14][1])
+        and (lm3d[20][1] > lm3d[18][1])
+        and (not four_straight)
+    )
+    fa_cond = thumb_down and thumb_far and four_fist
+    if fa_cond:
+        return "Fa"
 
     # Sol：五指伸直 + 掌面法线接近摄像头方向（|z| 分量占主导）
     # 这里对拇指做宽松判定：tip(4) 相对 wrist(0) 的距离较大即认为伸出
@@ -121,6 +147,27 @@ def classify_curwen_gesture(lm3d: np.ndarray) -> str:
     if five_straight and palm_facing_camera and hand_upright:
         return "Sol"
 
+    tips = [4, 8, 12, 16, 20]
+    all_tips_lower = all(float(lm3d[i][1]) > float(palm_center[1]) for i in tips)
+    curved = (index_curled or middle_curled or ring_curled or pinky_curled) and (not four_straight)
+    la_cond = all_tips_lower and curved
+    if la_cond:
+        return "La"
+
+    ti_cond = (
+        index_straight
+        and (float(lm3d[8][1]) < float(lm3d[6][1]))
+        and (float(lm3d[8][1]) < float(lm3d[5][1]))
+        and (not middle_straight)
+        and (not ring_straight)
+        and (not pinky_straight)
+        and (float(lm3d[12][1]) > float(lm3d[10][1]))
+        and (float(lm3d[16][1]) > float(lm3d[14][1]))
+        and (float(lm3d[20][1]) > float(lm3d[18][1]))
+    )
+    if ti_cond:
+        return "Ti"
+
     return "None"
 
 
@@ -136,8 +183,12 @@ def generate_strum_chord(
     """
     chord_freqs: Dict[str, Tuple[float, ...]] = {
         "C": (261.63, 329.63, 392.00),   # C E G
+        "Dm": (293.66, 349.23, 440.00),  # D F A
         "Em": (329.63, 392.00, 493.88),  # E G B
+        "F": (349.23, 440.00, 523.25),   # F A C
         "G": (196.00, 246.94, 392.00),   # G B D（用 B3, D4, G4 的组合近似）
+        "Am": (220.00, 261.63, 329.63),  # A C E
+        "G7": (196.00, 246.94, 293.66, 349.23),  # G B D F
     }
     freqs = chord_freqs.get(chord)
     if not freqs:
@@ -225,17 +276,22 @@ HAND_CONNECTIONS = [
 ]
 
 
-def draw_hand_landmarks(frame: np.ndarray, lm3d: np.ndarray) -> None:
+def draw_hand_landmarks(
+    frame: np.ndarray,
+    lm3d: np.ndarray,
+    line_color: Tuple[int, int, int],
+    point_color: Tuple[int, int, int],
+) -> None:
     h, w = frame.shape[:2]
 
     for a, b in HAND_CONNECTIONS:
         ax, ay = int(lm3d[a][0] * w), int(lm3d[a][1] * h)
         bx, by = int(lm3d[b][0] * w), int(lm3d[b][1] * h)
-        cv2.line(frame, (ax, ay), (bx, by), (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(frame, (ax, ay), (bx, by), line_color, 2, cv2.LINE_AA)
 
     for i in range(lm3d.shape[0]):
         x, y = int(lm3d[i][0] * w), int(lm3d[i][1] * h)
-        cv2.circle(frame, (x, y), 3, (0, 255, 0), -1, cv2.LINE_AA)
+        cv2.circle(frame, (x, y), 4, point_color, -1, cv2.LINE_AA)
 
 
 def ensure_hand_landmarker_model(model_path: str) -> None:
@@ -296,6 +352,67 @@ class GestureDebouncer:
         return self._stable, False
 
 
+class LandmarkSmoother:
+    def __init__(self, alpha: float = 0.6):
+        self.alpha = float(alpha)
+        self._value: Optional[np.ndarray] = None
+
+    def update(self, value: np.ndarray) -> np.ndarray:
+        if self._value is None:
+            self._value = value.copy()
+            return self._value
+        self._value = (self.alpha * value) + ((1.0 - self.alpha) * self._value)
+        return self._value
+
+
+class StrumDetector:
+    def __init__(self):
+        self._last_wrist_y: Optional[float] = None
+        self._last_strum_t: float = 0.0
+        self._pinch_closed: bool = False
+        self._last_pinch_t: float = 0.0
+
+    def update(self, lm3d: np.ndarray, now_s: float) -> Tuple[bool, bool]:
+        wrist_y = float(lm3d[0][1])
+        strum = False
+        pinch = False
+
+        if self._last_wrist_y is not None:
+            dy = wrist_y - self._last_wrist_y
+            if dy > 0.10 and (now_s - self._last_strum_t) > 0.25:
+                strum = True
+                self._last_strum_t = now_s
+        self._last_wrist_y = wrist_y
+
+        thumb_tip = lm3d[4]
+        index_tip = lm3d[8]
+        hand_scale = _safe_norm(_vec(lm3d[0], lm3d[9]))
+        pinch_ratio = _safe_norm(_vec(thumb_tip, index_tip)) / max(hand_scale, 1e-6)
+        is_closed = pinch_ratio < 0.35
+        is_open = pinch_ratio > 0.45
+
+        if is_closed:
+            self._pinch_closed = True
+        elif is_open and self._pinch_closed and (now_s - self._last_pinch_t) > 0.25:
+            pinch = True
+            self._last_pinch_t = now_s
+            self._pinch_closed = False
+
+        return strum, pinch
+
+
+def _hand_label(results, i: int) -> str:
+    try:
+        handedness = results.handedness[i]
+        if handedness and handedness[0]:
+            c = handedness[0]
+            label = getattr(c, "category_name", None) or getattr(c, "display_name", None) or ""
+            return str(label)
+    except Exception:
+        return ""
+    return ""
+
+
 def main() -> None:
     # 1) 初始化音频：建议先 pre_init 再 init 以获得更低延迟
     pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
@@ -310,14 +427,22 @@ def main() -> None:
 
     chord_sounds: Dict[str, pygame.mixer.Sound] = {
         "C": load_chord_sound("C", audio_dir),
+        "Dm": load_chord_sound("Dm", audio_dir),
         "Em": load_chord_sound("Em", audio_dir),
+        "F": load_chord_sound("F", audio_dir),
         "G": load_chord_sound("G", audio_dir),
+        "Am": load_chord_sound("Am", audio_dir),
+        "G7": load_chord_sound("G7", audio_dir),
     }
 
     gesture_to_chord = {
         "Do": "C",
+        "Re": "Dm",
         "Mi": "Em",
+        "Fa": "F",
         "Sol": "G",
+        "La": "Am",
+        "Ti": "G7",
         "None": "",
     }
 
@@ -334,7 +459,7 @@ def main() -> None:
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
         running_mode=RunningMode.VIDEO,
-        num_hands=1,
+        num_hands=2,
         min_hand_detection_confidence=0.6,
         min_hand_presence_confidence=0.6,
         min_tracking_confidence=0.6,
@@ -342,9 +467,14 @@ def main() -> None:
     landmarker = HandLandmarker.create_from_options(options)
 
     debouncer = GestureDebouncer(stable_frames=5)
-    last_triggered: str = "None"
     current_display_gesture: str = "None"
-    current_display_chord: str = ""
+    selected_chord: str = ""
+    chord_change_t: float = 0.0
+    right_trigger_t: float = 0.0
+
+    left_smoother = LandmarkSmoother(alpha=0.65)
+    right_smoother = LandmarkSmoother(alpha=0.65)
+    right_strum = StrumDetector()
 
     last_fps_t = time.time()
     fps = 0.0
@@ -366,32 +496,54 @@ def main() -> None:
             timestamp_ms = int(time.time() * 1000)
             results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            raw_gesture = "None"
-            if results.hand_landmarks:
-                hand_landmarks = results.hand_landmarks[0]
+            now_s = time.time()
 
-                lm = np.array(
-                    [[p.x, p.y, p.z] for p in hand_landmarks],
-                    dtype=np.float32,
-                )
-                draw_hand_landmarks(frame, lm)
-                raw_gesture = classify_curwen_gesture(lm)
+            left_lm: Optional[np.ndarray] = None
+            right_lm: Optional[np.ndarray] = None
+
+            if results.hand_landmarks:
+                for i, hand_landmarks in enumerate(results.hand_landmarks):
+                    lm = np.array([[p.x, p.y, p.z] for p in hand_landmarks], dtype=np.float32)
+                    label = _hand_label(results, i).lower()
+                    if "left" in label:
+                        left_lm = left_smoother.update(lm)
+                    elif "right" in label:
+                        right_lm = right_smoother.update(lm)
+                    elif left_lm is None:
+                        left_lm = left_smoother.update(lm)
+                    elif right_lm is None:
+                        right_lm = right_smoother.update(lm)
+
+            if left_lm is not None:
+                draw_hand_landmarks(frame, left_lm, (255, 180, 0), (255, 255, 255))
+                raw_gesture = classify_curwen_gesture(left_lm)
+            else:
+                raw_gesture = "None"
 
             stable_gesture, changed = debouncer.update(raw_gesture)
-            chord = gesture_to_chord.get(stable_gesture, "")
-
             current_display_gesture = stable_gesture
-            current_display_chord = chord
 
             if changed:
-                if stable_gesture in ("Do", "Mi", "Sol") and stable_gesture != last_triggered:
-                    snd = chord_sounds.get(chord)
+                new_chord = gesture_to_chord.get(stable_gesture, "")
+                if new_chord != selected_chord:
+                    selected_chord = new_chord
+                    chord_change_t = now_s
+
+            if right_lm is not None:
+                draw_hand_landmarks(frame, right_lm, (255, 80, 255), (255, 255, 255))
+                did_strum, did_pinch = right_strum.update(right_lm, now_s)
+                if (did_strum or did_pinch) and selected_chord:
+                    snd = chord_sounds.get(selected_chord)
                     if snd:
                         snd.stop()
                         snd.play()
-                    last_triggered = stable_gesture
-                elif stable_gesture == "None":
-                    last_triggered = "None"
+                    right_trigger_t = now_s
+            elif changed and stable_gesture in ("Do", "Re", "Mi", "Fa", "Sol", "La", "Ti") and selected_chord:
+                snd = chord_sounds.get(selected_chord)
+                if snd:
+                    snd.stop()
+                    snd.play()
+                right_trigger_t = now_s
 
             now = time.time()
             dt = now - last_fps_t
@@ -399,17 +551,44 @@ def main() -> None:
                 fps = 0.9 * fps + 0.1 * (1.0 / dt)
             last_fps_t = now
 
-            overlay = f"Gesture: {current_display_gesture}   Chord: {current_display_chord}   FPS: {fps:.1f}"
+            overlay = f"Gesture: {current_display_gesture}   Chord: {selected_chord or '-'}   FPS: {fps:.1f}"
             cv2.putText(
                 frame,
                 overlay,
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.75,
-                (0, 255, 0),
+                0.95,
+                (255, 220, 120),
                 2,
                 cv2.LINE_AA,
             )
+
+            if selected_chord and (now_s - chord_change_t) < 0.35:
+                hud = frame.copy()
+                cv2.rectangle(hud, (0, 0), (frame.shape[1], 70), (255, 120, 0), -1)
+                frame[:] = cv2.addWeighted(hud, 0.25, frame, 0.75, 0)
+                cv2.putText(
+                    frame,
+                    f"{selected_chord}",
+                    (10, 62),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.8,
+                    (255, 255, 255),
+                    4,
+                    cv2.LINE_AA,
+                )
+
+            if (now_s - right_trigger_t) < 0.20:
+                cv2.putText(
+                    frame,
+                    "TRIGGER",
+                    (frame.shape[1] - 210, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.95,
+                    (255, 255, 255),
+                    3,
+                    cv2.LINE_AA,
+                )
 
             cv2.imshow(window_name, frame)
 
